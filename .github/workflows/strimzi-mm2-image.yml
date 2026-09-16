@@ -33,13 +33,37 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+
+      # The jars replace files inside the Strimzi image, so their version has to be the image's
+      # version exactly. Branching off trunk instead of the tag builds 4.3.2-SNAPSHOT jars that
+      # would either fail to copy or, worse, be renamed into a 4.3.0 distribution. Check it
+      # before the build, so the run fails in seconds instead of after the compile.
+      - name: the checkout must be the image's Kafka version
+        run: |
+          set -euo pipefail
+          built=$(sed -n 's/^version=//p' gradle.properties)
+          echo "gradle.properties says: $built, image needs: $KAFKA_VERSION"
+          if [ "$built" != "$KAFKA_VERSION" ]; then
+            echo "::error::this branch builds $built but the image carries $KAFKA_VERSION."
+            echo "::error::branch off the tag: git checkout -b <branch> $KAFKA_VERSION"
+            exit 1
+          fi
+
       # Only these two modules carry the fix. A full releaseTarGz would take an hour and
       # produce nothing else the image needs.
       - run: ./gradlew --no-daemon :clients:jar :connect:mirror:jar
-      - run: |
+
+      - name: collect the jars
+        run: |
+          set -euo pipefail
+          echo "built artifacts:"
+          find clients/build/libs connect/mirror/build/libs -name '*.jar' | sort
           mkdir -p jars
-          cp clients/build/libs/kafka-clients-${KAFKA_VERSION}.jar jars/
-          cp connect/mirror/build/libs/connect-mirror-${KAFKA_VERSION}.jar jars/
+          for f in clients/build/libs/kafka-clients-${KAFKA_VERSION}.jar \
+                   connect/mirror/build/libs/connect-mirror-${KAFKA_VERSION}.jar; do
+            [ -f "$f" ] || { echo "::error::missing $f, see the listing above"; exit 1; }
+            cp "$f" jars/
+          done
           sha256sum jars/*.jar | tee jars/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
