@@ -65,6 +65,11 @@ public class JmxReporter implements MetricsReporter {
 
     private static final Logger log = LoggerFactory.getLogger(JmxReporter.class);
     private static final Object LOCK = new Object();
+    // An ObjectName carries no instance identity, so two generations of the same task build
+    // the same name. The platform MBeanServer is shared by every task in the JVM, and
+    // unregisterMBean removes by name. Without this map a departing reporter deletes the
+    // registration a newer reporter already owns, and the newer one never learns it.
+    private static final Map<ObjectName, KafkaMbean> OWNERS = new HashMap<>();
     private String prefix;
     private final Map<String, KafkaMbean> mbeans = new HashMap<>();
     private Predicate<String> mbeanPredicate = s -> true;
@@ -197,19 +202,30 @@ public class JmxReporter implements MetricsReporter {
     }
 
     private void unregister(KafkaMbean mbean) {
+        // Only the current owner may remove the registration. A reporter that closes after a
+        // newer one took the name over leaves the newer registration alone.
+        if (OWNERS.get(mbean.name()) != mbean)
+            return;
+        forceUnregister(mbean.name());
+        OWNERS.remove(mbean.name());
+    }
+
+    private void forceUnregister(ObjectName name) {
         MBeanServer server = ManagementFactory.getPlatformMBeanServer();
         try {
-            if (server.isRegistered(mbean.name()))
-                server.unregisterMBean(mbean.name());
+            if (server.isRegistered(name))
+                server.unregisterMBean(name);
         } catch (JMException e) {
             throw new KafkaException("Error unregistering mbean", e);
         }
     }
 
     private void reregister(KafkaMbean mbean) {
-        unregister(mbean);
+        // Registration is a takeover: the newest registrant wins the name and becomes the owner.
+        forceUnregister(mbean.name());
         try {
             ManagementFactory.getPlatformMBeanServer().registerMBean(mbean, mbean.name());
+            OWNERS.put(mbean.name(), mbean);
         } catch (JMException e) {
             throw new KafkaException("Error registering mbean " + mbean.name(), e);
         }

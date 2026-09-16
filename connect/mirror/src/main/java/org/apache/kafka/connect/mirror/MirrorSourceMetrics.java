@@ -97,7 +97,13 @@ public class MirrorSourceMetrics {
         private final Sensor replicationLatencySensor;
 
         PartitionMetrics(TopicPartition topicPartition) {
-            String prefix = topicPartition.topic() + "-" + topicPartition.partition() + "-";
+            // Metrics.sensor() is get-or-create and every task of the worker shares one
+            // registry here. The key needs the route, because two routes mirror a same-named
+            // topic under IdentityReplicationPolicy, and it needs the instance, because two
+            // generations of one task overlap while the older one is still closing.
+            String prefix = source + "-" + target + "-"
+                    + System.identityHashCode(MirrorSourceMetrics.this) + "-"
+                    + topicPartition.topic() + "-" + topicPartition.partition() + "-";
 
             LinkedHashMap<String, String> tags = new LinkedHashMap<>();
             tags.put("source", source);
