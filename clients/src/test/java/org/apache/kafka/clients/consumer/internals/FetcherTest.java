@@ -2726,6 +2726,94 @@ public class FetcherTest {
     }
 
     @Test
+    public void testLastFetchConfirmedCoversPartitionsOmittedFromIncrementalResponse() {
+        buildFetcher();
+
+        assignFromUser(Set.of(tp0, tp1));
+        subscriptions.seekValidated(tp0, new SubscriptionState.FetchPosition(0, Optional.empty(), metadata.currentLeader(tp0)));
+        subscriptions.seekValidated(tp1, new SubscriptionState.FetchPosition(0, Optional.empty(), metadata.currentLeader(tp1)));
+
+        // The first response is full and it names both partitions.
+        LinkedHashMap<TopicIdPartition, FetchResponseData.PartitionData> partitions1 = new LinkedHashMap<>();
+        partitions1.put(tidp0, new FetchResponseData.PartitionData()
+                .setPartitionIndex(tp0.partition())
+                .setHighWatermark(0)
+                .setLogStartOffset(0)
+                .setRecords(emptyRecords));
+        partitions1.put(tidp1, new FetchResponseData.PartitionData()
+                .setPartitionIndex(tp1.partition())
+                .setHighWatermark(0)
+                .setLogStartOffset(0)
+                .setRecords(emptyRecords));
+        assertEquals(1, sendFetches());
+        assertFetchConfirmedAbout(0, tp1);
+        assertEquals(0, fetchNode(tp1));
+        time.sleep(1000);
+        assertFetchConfirmedAbout(1000, tp1);
+        client.prepareResponse(FetchResponse.of(Errors.NONE, 0, 123, partitions1, List.of()));
+        consumerClient.poll(time.timer(0));
+        fetchRecords();
+        assertFetchConfirmedAbout(0, tp0);
+        assertFetchConfirmedAbout(0, tp1);
+
+        // An incremental response that omits tp1 still confirms it: the broker has nothing new for it.
+        time.sleep(5000);
+        assertFetchConfirmedAbout(5000, tp1);
+        LinkedHashMap<TopicIdPartition, FetchResponseData.PartitionData> partitions2 = new LinkedHashMap<>();
+        partitions2.put(tidp0, new FetchResponseData.PartitionData()
+                .setPartitionIndex(tp0.partition())
+                .setHighWatermark(3)
+                .setLogStartOffset(0)
+                .setRecords(records));
+        assertEquals(1, sendFetches());
+        client.prepareResponse(FetchResponse.of(Errors.NONE, 0, 123, partitions2, List.of()));
+        consumerClient.poll(time.timer(0));
+        fetchRecords();
+        assertFetchConfirmedAbout(0, tp0);
+        assertFetchConfirmedAbout(0, tp1);
+
+        // A partition error does not confirm the partition.
+        time.sleep(2000);
+        LinkedHashMap<TopicIdPartition, FetchResponseData.PartitionData> partitions3 = new LinkedHashMap<>();
+        partitions3.put(tidp1, new FetchResponseData.PartitionData()
+                .setPartitionIndex(tp1.partition())
+                .setErrorCode(Errors.NOT_LEADER_OR_FOLLOWER.code())
+                .setHighWatermark(FetchResponse.INVALID_HIGH_WATERMARK)
+                .setLogStartOffset(0)
+                .setRecords(emptyRecords));
+        assertEquals(1, sendFetches());
+        client.prepareResponse(FetchResponse.of(Errors.NONE, 0, 123, partitions3, List.of()));
+        consumerClient.poll(time.timer(0));
+        fetchRecords();
+        assertFetchConfirmedAbout(0, tp0);
+        assertFetchConfirmedAbout(2000, tp1);
+
+        // A disconnect confirms nothing, so both ages keep growing.
+        time.sleep(3000);
+        assertEquals(1, sendFetches());
+        client.prepareResponse(FetchResponse.of(Errors.NONE, 0, 123, new LinkedHashMap<>(), List.of()), true);
+        consumerClient.poll(time.timer(0));
+        fetchRecords();
+        assertFetchConfirmedAbout(3000, tp0);
+        assertFetchConfirmedAbout(5000, tp1);
+    }
+
+    // MockTime(1) ticks on each read, so the age can exceed the slept time by a few ms.
+    private void assertFetchConfirmedAbout(long expectedMs, TopicPartition tp) {
+        long ageMs = partitionGauge(metricsRegistry.partitionLastFetchConfirmedMsAgo, tp).longValue();
+        assertTrue(ageMs >= expectedMs && ageMs < expectedMs + 100, "age " + ageMs + " ms, expected about " + expectedMs + " ms");
+    }
+
+    private int fetchNode(TopicPartition tp) {
+        return partitionGauge(metricsRegistry.partitionFetchNode, tp).intValue();
+    }
+
+    private Number partitionGauge(MetricNameTemplate template, TopicPartition tp) {
+        Map<String, String> tags = Map.of("topic", tp.topic(), "partition", String.valueOf(tp.partition()));
+        return (Number) metrics.metrics().get(metrics.metricInstance(template, tags)).metricValue();
+    }
+
+    @Test
     public void testConsumingViaIncrementalFetchRequests() {
         buildFetcher(2);
 

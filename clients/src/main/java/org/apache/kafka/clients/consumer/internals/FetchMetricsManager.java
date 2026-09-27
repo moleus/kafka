@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.common.MetricName;
+import org.apache.kafka.common.MetricNameTemplate;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.metrics.Gauge;
 import org.apache.kafka.common.metrics.Metrics;
@@ -26,6 +27,7 @@ import org.apache.kafka.common.metrics.stats.WindowedCount;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.apache.kafka.common.utils.Utils.mkEntry;
 import static org.apache.kafka.common.utils.Utils.mkMap;
@@ -51,6 +53,9 @@ public class FetchMetricsManager {
 
     private int assignmentId = 0;
     private Set<TopicPartition> assignedPartitions = Collections.emptySet();
+    // A JMX reader thread reads both maps while the fetch thread writes them.
+    private final Map<TopicPartition, Long> lastFetchConfirmedMs = new ConcurrentHashMap<>();
+    private final Map<TopicPartition, Integer> fetchNodes = new ConcurrentHashMap<>();
 
     public FetchMetricsManager(Metrics metrics, FetchMetricsRegistry metricsRegistry) {
         this.metrics = metrics;
@@ -158,13 +163,30 @@ public class FetchMetricsManager {
     }
 
     /**
+     * Records that a successful fetch response covered the partition without an error.
+     * Does nothing for a partition that is no longer assigned.
+     */
+    void recordPartitionFetchConfirmed(TopicPartition tp, long nowMs) {
+        lastFetchConfirmedMs.computeIfPresent(tp, (k, v) -> nowMs);
+    }
+
+    /**
+     * Records the node the partition is fetched from, or -1 if there is none.
+     * Does nothing for a partition that is no longer assigned.
+     */
+    void recordPartitionFetchNode(TopicPartition tp, int nodeId) {
+        fetchNodes.computeIfPresent(tp, (k, v) -> nodeId);
+    }
+
+    /**
      * This method is called by the {@link Fetch fetch} logic before it requests fetches in order to update the
      * internal set of metrics that are tracked.
      *
      * @param subscription {@link SubscriptionState} that contains the set of assigned partitions
+     * @param nowMs        current time, the start of the fetch age of a newly assigned partition
      * @see SubscriptionState#assignmentId()
      */
-    void maybeUpdateAssignment(SubscriptionState subscription) {
+    void maybeUpdateAssignment(SubscriptionState subscription, long nowMs) {
         int newAssignmentId = subscription.assignmentId();
 
         if (this.assignmentId != newAssignmentId) {
@@ -175,6 +197,10 @@ public class FetchMetricsManager {
                     metrics.removeSensor(partitionRecordsLagMetricName(tp));
                     metrics.removeSensor(partitionRecordsLeadMetricName(tp));
                     metrics.removeMetric(partitionPreferredReadReplicaMetricName(tp));
+                    metrics.removeMetric(partitionMetricName(metricsRegistry.partitionLastFetchConfirmedMsAgo, tp));
+                    metrics.removeMetric(partitionMetricName(metricsRegistry.partitionFetchNode, tp));
+                    lastFetchConfirmedMs.remove(tp);
+                    fetchNodes.remove(tp);
                     // Remove deprecated metrics.
                     metrics.removeSensor(deprecatedMetricName(partitionRecordsLagMetricName(tp)));
                     metrics.removeSensor(deprecatedMetricName(partitionRecordsLeadMetricName(tp)));
@@ -191,6 +217,23 @@ public class FetchMetricsManager {
                         metricName,
                         null,
                         (Gauge<Integer>) (config, now) -> subscription.preferredReadReplica(tp, 0L).orElse(-1)
+                    );
+
+                    // The age starts at the assignment, so a partition that is never fetched still ages.
+                    lastFetchConfirmedMs.put(tp, nowMs);
+                    fetchNodes.put(tp, -1);
+                    metrics.addMetricIfAbsent(
+                        partitionMetricName(metricsRegistry.partitionLastFetchConfirmedMsAgo, tp),
+                        null,
+                        (Gauge<Long>) (config, now) -> {
+                            Long confirmedMs = lastFetchConfirmedMs.get(tp);
+                            return confirmedMs == null ? -1L : Math.max(0L, now - confirmedMs);
+                        }
+                    );
+                    metrics.addMetricIfAbsent(
+                        partitionMetricName(metricsRegistry.partitionFetchNode, tp),
+                        null,
+                        (Gauge<Integer>) (config, now) -> fetchNodes.getOrDefault(tp, -1)
                     );
                 }
             }
@@ -283,6 +326,11 @@ public class FetchMetricsManager {
 
     private static boolean shouldReportDeprecatedMetric(String topic) {
         return topic.contains(".");
+    }
+
+    private MetricName partitionMetricName(MetricNameTemplate template, TopicPartition tp) {
+        Map<String, String> metricTags = mkMap(mkEntry("topic", tp.topic()), mkEntry("partition", String.valueOf(tp.partition())));
+        return this.metrics.metricInstance(template, metricTags);
     }
 
     private MetricName partitionPreferredReadReplicaMetricName(TopicPartition tp) {

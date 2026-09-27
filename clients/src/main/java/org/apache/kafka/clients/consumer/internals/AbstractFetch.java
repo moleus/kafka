@@ -173,6 +173,15 @@ public abstract class AbstractFetch implements Closeable {
 
             final Map<TopicPartition, FetchResponseData.PartitionData> responseData = response.responseData(handler.sessionTopicNames(), requestVersion);
             final Set<TopicPartition> partitions = new HashSet<>(responseData.keySet());
+
+            // An incremental response omits a partition that has nothing new, so the request lists the partitions it covers.
+            final long responseTimeMs = time.milliseconds();
+            for (TopicPartition partition : data.sessionPartitions().keySet()) {
+                FetchResponseData.PartitionData partitionData = responseData.get(partition);
+                if (partitionData == null || partitionData.errorCode() == Errors.NONE.code())
+                    metricsManager.recordPartitionFetchConfirmed(partition, responseTimeMs);
+            }
+
             final FetchMetricsAggregator metricAggregator = new FetchMetricsAggregator(metricsManager, partitions);
 
             boolean needsWakeup = true;
@@ -419,11 +428,12 @@ public abstract class AbstractFetch implements Closeable {
      * that have no existing requests in flight.
      */
     protected Map<Node, FetchSessionHandler.FetchRequestData> prepareFetchRequests() {
+        long currentTimeMs = time.milliseconds();
+
         // Update metrics in case there was an assignment change
-        metricsManager.maybeUpdateAssignment(subscriptions);
+        metricsManager.maybeUpdateAssignment(subscriptions, currentTimeMs);
 
         Map<Node, FetchSessionHandler.Builder> fetchable = new HashMap<>();
-        long currentTimeMs = time.milliseconds();
         Map<String, Uuid> topicIds = metadata.topicIds();
 
         // This is the set of partitions that have buffered data
@@ -443,6 +453,7 @@ public abstract class AbstractFetch implements Closeable {
         for (TopicPartition partition : unbuffered) {
             SubscriptionState.FetchPosition position = positionForPartition(partition);
             Optional<Node> nodeOpt = maybeNodeForPosition(partition, position, currentTimeMs);
+            metricsManager.recordPartitionFetchNode(partition, nodeOpt.map(Node::id).orElse(-1));
 
             if (nodeOpt.isEmpty())
                 continue;

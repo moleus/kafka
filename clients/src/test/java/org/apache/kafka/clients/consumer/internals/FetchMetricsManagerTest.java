@@ -38,6 +38,7 @@ import java.util.Set;
 import static org.apache.kafka.clients.consumer.internals.FetchMetricsManager.topicPartitionTags;
 import static org.apache.kafka.clients.consumer.internals.FetchMetricsManager.topicTags;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class FetchMetricsManagerTest {
@@ -308,15 +309,15 @@ public class FetchMetricsManagerTest {
         SubscriptionState subscriptionState = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
         subscriptionState.assignFromUser(Set.of(tp1));
 
-        metricsManager.maybeUpdateAssignment(subscriptionState);
-        // 1 new metrics shall be registered.
-        assertEquals(1, metrics.metrics().size() - initialMetricsSize);
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
+        // 3 new metrics shall be registered: preferred read replica, fetch age and fetch node.
+        assertEquals(3, metrics.metrics().size() - initialMetricsSize);
 
         subscriptionState.assignFromUser(Set.of(tp1, tp2));
         subscriptionState.updatePreferredReadReplica(tp2, 1, () -> 0L);
-        metricsManager.maybeUpdateAssignment(subscriptionState);
-        // Another 2 metrics get registered as deprecated metrics should be reported for tp2.
-        assertEquals(3, metrics.metrics().size() - initialMetricsSize);
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
+        // Another 4 metrics get registered, one of them deprecated, because tp2 has a dot in its topic.
+        assertEquals(7, metrics.metrics().size() - initialMetricsSize);
 
         Map<String, String> tags1 = Map.of("topic", tp1.topic(), "partition", String.valueOf(tp1.partition()));
         Map<String, String> tags2 = Map.of("topic", tp2.topic(), "partition", String.valueOf(tp2.partition()));
@@ -328,15 +329,44 @@ public class FetchMetricsManagerTest {
 
         // Remove tp2 from subscription set.
         subscriptionState.assignFromUser(Set.of(tp1, tp3));
-        metricsManager.maybeUpdateAssignment(subscriptionState);
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
         // Metrics count shall remain same as tp2 should be removed and tp3 gets added.
-        assertEquals(3, metrics.metrics().size() - initialMetricsSize);
+        assertEquals(7, metrics.metrics().size() - initialMetricsSize);
 
         // Remove all partitions.
         subscriptionState.assignFromUser(Set.of());
-        metricsManager.maybeUpdateAssignment(subscriptionState);
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
         // Metrics count shall be same as initial count as all new metrics shall be removed.
         assertEquals(initialMetricsSize, metrics.metrics().size());
+    }
+
+    @Test
+    public void testLastFetchConfirmedMsAgo() {
+        TopicPartition tp = new TopicPartition(TOPIC_NAME, 0);
+        Map<String, String> tags = Map.of("topic", tp.topic(), "partition", String.valueOf(tp.partition()));
+        SubscriptionState subscriptionState = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        subscriptionState.assignFromUser(Set.of(tp));
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
+
+        // The age counts from the assignment until the first confirmation.
+        time.sleep(1000);
+        assertFetchConfirmedAbout(1000, tags);
+        metricsManager.recordPartitionFetchConfirmed(tp, time.milliseconds());
+        assertFetchConfirmedAbout(0, tags);
+        time.sleep(500);
+        assertFetchConfirmedAbout(500, tags);
+
+        assertEquals(-1, gaugeValue(metricsRegistry.partitionFetchNode, tags).intValue());
+        metricsManager.recordPartitionFetchNode(tp, 3);
+        assertEquals(3, gaugeValue(metricsRegistry.partitionFetchNode, tags).intValue());
+
+        // A late record for an unassigned partition must not bring its state back.
+        subscriptionState.assignFromUser(Set.of());
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
+        metricsManager.recordPartitionFetchConfirmed(tp, time.milliseconds());
+        metricsManager.recordPartitionFetchNode(tp, 3);
+        assertNull(metrics.metric(metrics.metricInstance(metricsRegistry.partitionLastFetchConfirmedMsAgo, tags)));
+        assertNull(metrics.metric(metrics.metricInstance(metricsRegistry.partitionFetchNode, tags)));
     }
 
     @Test
@@ -358,22 +388,22 @@ public class FetchMetricsManagerTest {
 
         SubscriptionState subscriptionState = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
         subscriptionState.assignFromUser(Set.of(tp1, tp2, tp3));
-        metricsManager.maybeUpdateAssignment(subscriptionState);
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
 
-        // 5 new metrics shall be registered.
-        assertEquals(5, metrics.metrics().size() - additionalRegisteredMetricsSize);
+        // 11 new metrics shall be registered: 5 preferred read replica metrics, 3 fetch ages, 3 fetch nodes.
+        assertEquals(11, metrics.metrics().size() - additionalRegisteredMetricsSize);
 
         // Remove 1 partition which has deprecated metrics as well.
         subscriptionState.assignFromUser(Set.of(tp1, tp2));
-        metricsManager.maybeUpdateAssignment(subscriptionState);
-        // For tp2, 14 metrics will be unregistered. 3 for partition lag, 3 for partition lead, 1 for
-        // preferred read replica and similarly 7 deprecated metrics. Hence, we should have 9 metrics
-        // removed from additionalRegisteredMetricsSize.
-        assertEquals(9, additionalRegisteredMetricsSize - metrics.metrics().size());
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
+        // For tp2, 16 metrics will be unregistered. 3 for partition lag, 3 for partition lead, 1 for
+        // preferred read replica, 2 fetch gauges and 7 deprecated metrics. The assignment added 11, hence
+        // we should have 5 metrics removed from additionalRegisteredMetricsSize.
+        assertEquals(5, additionalRegisteredMetricsSize - metrics.metrics().size());
 
         // Remove all partitions.
         subscriptionState.assignFromUser(Set.of());
-        metricsManager.maybeUpdateAssignment(subscriptionState);
+        metricsManager.maybeUpdateAssignment(subscriptionState, time.milliseconds());
         // Metrics count shall be same as initial count as all new metrics shall be removed.
         assertEquals(initialMetricsSize, metrics.metrics().size());
     }
@@ -393,6 +423,16 @@ public class FetchMetricsManagerTest {
     private double metricValue(MetricNameTemplate name, Map<String, String> tags) {
         MetricName metricName = metrics.metricInstance(name, tags);
         return metricValue(metricName);
+    }
+
+    // MockTime ticks on each read, so the age can exceed the slept time by a few ms.
+    private void assertFetchConfirmedAbout(long expectedMs, Map<String, String> tags) {
+        long ageMs = gaugeValue(metricsRegistry.partitionLastFetchConfirmedMsAgo, tags).longValue();
+        assertTrue(ageMs >= expectedMs && ageMs < expectedMs + 100, "age " + ageMs + " ms, expected about " + expectedMs + " ms");
+    }
+
+    private Number gaugeValue(MetricNameTemplate name, Map<String, String> tags) {
+        return (Number) metrics.metric(metrics.metricInstance(name, tags)).metricValue();
     }
 
     private double metricValue(MetricName metricName) {

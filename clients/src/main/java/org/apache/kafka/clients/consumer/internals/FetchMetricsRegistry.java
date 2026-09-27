@@ -58,6 +58,8 @@ public class FetchMetricsRegistry {
     public MetricNameTemplate partitionRecordsLeadMin;
     public MetricNameTemplate partitionRecordsLeadAvg;
     public MetricNameTemplate partitionPreferredReadReplica;
+    public MetricNameTemplate partitionLastFetchConfirmedMsAgo;
+    public MetricNameTemplate partitionFetchNode;
 
     public FetchMetricsRegistry() {
         this(new HashSet<>(), "");
@@ -146,6 +148,14 @@ public class FetchMetricsRegistry {
         this.partitionPreferredReadReplica = new MetricNameTemplate(
                 "preferred-read-replica", groupName,
                 "The current read replica for the partition, or -1 if reading from leader. " + DEPRECATED_TOPIC_METRICS_MESSAGE, partitionTags);
+        this.partitionLastFetchConfirmedMsAgo = new MetricNameTemplate(
+                "last-fetch-confirmed-ms-ago", groupName,
+                "The time in ms since a successful fetch response last covered the partition without an error. " +
+                "An incremental fetch response that omits the partition covers it too: the broker has nothing new for it. " +
+                "Counts from the assignment until the first such response.", partitionTags);
+        this.partitionFetchNode = new MetricNameTemplate(
+                "fetch-node", groupName,
+                "The id of the node the consumer fetches the partition from, or -1 if it has no node for the partition.", partitionTags);
     }
 
     public List<MetricNameTemplate> getAllTemplates() {
@@ -178,7 +188,9 @@ public class FetchMetricsRegistry {
             partitionRecordsLead,
             partitionRecordsLeadMin,
             partitionRecordsLeadAvg,
-            partitionPreferredReadReplica
+            partitionPreferredReadReplica,
+            partitionLastFetchConfirmedMsAgo,
+            partitionFetchNode
         );
     }
 
