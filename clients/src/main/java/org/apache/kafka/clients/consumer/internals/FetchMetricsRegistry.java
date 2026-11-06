@@ -60,6 +60,7 @@ public class FetchMetricsRegistry {
     public MetricNameTemplate partitionPreferredReadReplica;
     public MetricNameTemplate partitionLastFetchConfirmedMsAgo;
     public MetricNameTemplate partitionFetchNode;
+    public MetricNameTemplate partitionReadableEndOffset;
 
     public FetchMetricsRegistry() {
         this(new HashSet<>(), "");
@@ -156,6 +157,11 @@ public class FetchMetricsRegistry {
         this.partitionFetchNode = new MetricNameTemplate(
                 "fetch-node", groupName,
                 "The id of the node the consumer fetches the partition from, or -1 if it has no node for the partition.", partitionTags);
+        this.partitionReadableEndOffset = new MetricNameTemplate(
+                "readable-end-offset", groupName,
+                "The end of the partition that the consumer can read: the high watermark, or the last stable offset with " +
+                "read_committed, as of the last successful fetch response that covered the partition. " +
+                "-1 until the first such response.", partitionTags);
     }
 
     public List<MetricNameTemplate> getAllTemplates() {
@@ -190,7 +196,8 @@ public class FetchMetricsRegistry {
             partitionRecordsLeadAvg,
             partitionPreferredReadReplica,
             partitionLastFetchConfirmedMsAgo,
-            partitionFetchNode
+            partitionFetchNode,
+            partitionReadableEndOffset
         );
     }
 

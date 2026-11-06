@@ -22,6 +22,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeader;
@@ -34,6 +35,7 @@ import org.apache.kafka.connect.storage.OffsetStorageReader;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -292,6 +294,52 @@ public class MirrorSourceTaskTest {
 
         // Expect that commitRecord will not throw an exception
         mirrorSourceTask.commitRecord(sourceRecord, null);
+    }
+
+    @Test
+    public void testAckedNextOffsetWaitsForEveryPolledRecord() {
+        TopicPartition tp = new TopicPartition("test", 0);
+        TopicPartition markerOnly = new TopicPartition("test", 1);
+        // Offset 6 is a tombstone and offset 7 is a transaction marker, so the position is 8.
+        List<ConsumerRecord<byte[], byte[]>> records = List.of(
+                new ConsumerRecord<>("test", 0, 5, "k".getBytes(), "v".getBytes()),
+                new ConsumerRecord<>("test", 0, 6, "k".getBytes(), null));
+        @SuppressWarnings("unchecked")
+        KafkaConsumer<byte[], byte[]> consumer = mock(KafkaConsumer.class);
+        when(consumer.poll(any())).thenReturn(new ConsumerRecords<>(Map.of(tp, records),
+                Map.of(tp, new OffsetAndMetadata(8), markerOnly, new OffsetAndMetadata(3))));
+        MirrorSourceTask task = new MirrorSourceTask(consumer, mock(MirrorSourceLegacyMetrics.class), "cluster1",
+                new DefaultReplicationPolicy(), null);
+
+        List<SourceRecord> sent = task.poll();
+        assertEquals(5L, task.ackedOffsets.nextOffset(tp));
+        assertEquals(3L, task.ackedOffsets.nextOffset(markerOnly));
+
+        RecordMetadata metadata = new RecordMetadata(new TopicPartition("cluster1.test", 0), 0, 0, 0, 0, 0);
+        task.commitRecord(sent.get(1), metadata);
+        assertEquals(5L, task.ackedOffsets.nextOffset(tp));
+        // A record without metadata was not acknowledged by the target.
+        task.commitRecord(sent.get(0), null);
+        assertEquals(5L, task.ackedOffsets.nextOffset(tp));
+        task.commitRecord(sent.get(0), metadata);
+        assertEquals(8L, task.ackedOffsets.nextOffset(tp));
+    }
+
+    @Test
+    public void testAckedNextOffsetOfUncommittedPartitionComesFromTheReset() {
+        TopicPartition tp = new TopicPartition("test", 0);
+        @SuppressWarnings("unchecked")
+        KafkaConsumer<byte[], byte[]> consumer = mock(KafkaConsumer.class);
+        when(consumer.poll(any())).thenReturn(ConsumerRecords.empty());
+        when(consumer.assignment()).thenReturn(Set.of(tp));
+        when(consumer.position(tp, Duration.ZERO)).thenThrow(new TimeoutException("no position yet")).thenReturn(4L);
+        MirrorSourceTask task = new MirrorSourceTask(consumer, mock(MirrorSourceLegacyMetrics.class), "cluster1",
+                new DefaultReplicationPolicy(), null);
+
+        task.poll();
+        assertEquals(-1L, task.ackedOffsets.nextOffset(tp));
+        task.poll();
+        assertEquals(4L, task.ackedOffsets.nextOffset(tp));
     }
 
     @Test

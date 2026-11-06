@@ -24,6 +24,7 @@ import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.NetworkClientUtils;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
@@ -176,8 +177,12 @@ public abstract class AbstractFetch implements Closeable {
 
             // An incremental response omits a partition that has nothing new, so the request lists the partitions it covers.
             final long responseTimeMs = time.milliseconds();
+            // The omitted partition keeps its end offset too: the broker omits it only while its high watermark stays.
             for (TopicPartition partition : data.sessionPartitions().keySet()) {
                 FetchResponseData.PartitionData partitionData = responseData.get(partition);
+                if (partitionData != null && partitionData.errorCode() == Errors.NONE.code())
+                    metricsManager.recordPartitionReadableEndOffset(partition, fetchConfig.isolationLevel == IsolationLevel.READ_COMMITTED
+                        ? partitionData.lastStableOffset() : partitionData.highWatermark());
                 if (partitionData == null || partitionData.errorCode() == Errors.NONE.code())
                     metricsManager.recordPartitionFetchConfirmed(partition, responseTimeMs);
             }

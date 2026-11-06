@@ -56,6 +56,7 @@ public class FetchMetricsManager {
     // A JMX reader thread reads both maps while the fetch thread writes them.
     private final Map<TopicPartition, Long> lastFetchConfirmedMs = new ConcurrentHashMap<>();
     private final Map<TopicPartition, Integer> fetchNodes = new ConcurrentHashMap<>();
+    private final Map<TopicPartition, Long> readableEndOffsets = new ConcurrentHashMap<>();
 
     public FetchMetricsManager(Metrics metrics, FetchMetricsRegistry metricsRegistry) {
         this.metrics = metrics;
@@ -179,6 +180,14 @@ public class FetchMetricsManager {
     }
 
     /**
+     * Records the end offset that a successful fetch response gave for the partition.
+     * Does nothing for a partition that is no longer assigned.
+     */
+    void recordPartitionReadableEndOffset(TopicPartition tp, long endOffset) {
+        readableEndOffsets.computeIfPresent(tp, (k, v) -> endOffset);
+    }
+
+    /**
      * This method is called by the {@link Fetch fetch} logic before it requests fetches in order to update the
      * internal set of metrics that are tracked.
      *
@@ -199,8 +208,10 @@ public class FetchMetricsManager {
                     metrics.removeMetric(partitionPreferredReadReplicaMetricName(tp));
                     metrics.removeMetric(partitionMetricName(metricsRegistry.partitionLastFetchConfirmedMsAgo, tp));
                     metrics.removeMetric(partitionMetricName(metricsRegistry.partitionFetchNode, tp));
+                    metrics.removeMetric(partitionMetricName(metricsRegistry.partitionReadableEndOffset, tp));
                     lastFetchConfirmedMs.remove(tp);
                     fetchNodes.remove(tp);
+                    readableEndOffsets.remove(tp);
                     // Remove deprecated metrics.
                     metrics.removeSensor(deprecatedMetricName(partitionRecordsLagMetricName(tp)));
                     metrics.removeSensor(deprecatedMetricName(partitionRecordsLeadMetricName(tp)));
@@ -234,6 +245,12 @@ public class FetchMetricsManager {
                         partitionMetricName(metricsRegistry.partitionFetchNode, tp),
                         null,
                         (Gauge<Integer>) (config, now) -> fetchNodes.getOrDefault(tp, -1)
+                    );
+                    readableEndOffsets.put(tp, -1L);
+                    metrics.addMetricIfAbsent(
+                        partitionMetricName(metricsRegistry.partitionReadableEndOffset, tp),
+                        null,
+                        (Gauge<Long>) (config, now) -> readableEndOffsets.getOrDefault(tp, -1L)
                     );
                 }
             }

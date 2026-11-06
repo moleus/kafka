@@ -2742,10 +2742,12 @@ public class FetcherTest {
                 .setRecords(emptyRecords));
         partitions1.put(tidp1, new FetchResponseData.PartitionData()
                 .setPartitionIndex(tp1.partition())
-                .setHighWatermark(0)
+                .setHighWatermark(5)
+                .setLastStableOffset(4)
                 .setLogStartOffset(0)
                 .setRecords(emptyRecords));
         assertEquals(1, sendFetches());
+        assertEquals(-1L, readableEndOffset(tp1));
         assertFetchConfirmedAbout(0, tp1);
         assertEquals(0, fetchNode(tp1));
         time.sleep(1000);
@@ -2755,6 +2757,8 @@ public class FetcherTest {
         fetchRecords();
         assertFetchConfirmedAbout(0, tp0);
         assertFetchConfirmedAbout(0, tp1);
+        assertEquals(0L, readableEndOffset(tp0));
+        assertEquals(5L, readableEndOffset(tp1));
 
         // An incremental response that omits tp1 still confirms it: the broker has nothing new for it.
         time.sleep(5000);
@@ -2771,6 +2775,9 @@ public class FetcherTest {
         fetchRecords();
         assertFetchConfirmedAbout(0, tp0);
         assertFetchConfirmedAbout(0, tp1);
+        // The omitted partition keeps its end: the broker omits it only while its high watermark stays.
+        assertEquals(3L, readableEndOffset(tp0));
+        assertEquals(5L, readableEndOffset(tp1));
 
         // A partition error does not confirm the partition.
         time.sleep(2000);
@@ -2787,6 +2794,7 @@ public class FetcherTest {
         fetchRecords();
         assertFetchConfirmedAbout(0, tp0);
         assertFetchConfirmedAbout(2000, tp1);
+        assertEquals(5L, readableEndOffset(tp1));
 
         // A disconnect confirms nothing, so both ages keep growing.
         time.sleep(3000);
@@ -2796,6 +2804,30 @@ public class FetcherTest {
         fetchRecords();
         assertFetchConfirmedAbout(3000, tp0);
         assertFetchConfirmedAbout(5000, tp1);
+    }
+
+    @Test
+    public void testReadableEndOffsetIsLastStableOffsetWithReadCommitted() {
+        buildFetcher(AutoOffsetResetStrategy.EARLIEST, new ByteArrayDeserializer(),
+                new ByteArrayDeserializer(), Integer.MAX_VALUE, IsolationLevel.READ_COMMITTED);
+        assignFromUser(Set.of(tp0));
+        subscriptions.seekValidated(tp0, new SubscriptionState.FetchPosition(0, Optional.empty(), metadata.currentLeader(tp0)));
+        LinkedHashMap<TopicIdPartition, FetchResponseData.PartitionData> partitions = new LinkedHashMap<>();
+        partitions.put(tidp0, new FetchResponseData.PartitionData()
+                .setPartitionIndex(tp0.partition())
+                .setHighWatermark(9)
+                .setLastStableOffset(7)
+                .setLogStartOffset(0)
+                .setRecords(emptyRecords));
+        assertEquals(1, sendFetches());
+        client.prepareResponse(FetchResponse.of(Errors.NONE, 0, 123, partitions, List.of()));
+        consumerClient.poll(time.timer(0));
+        fetchRecords();
+        assertEquals(7L, readableEndOffset(tp0));
+    }
+
+    private long readableEndOffset(TopicPartition tp) {
+        return partitionGauge(metricsRegistry.partitionReadableEndOffset, tp).longValue();
     }
 
     // MockTime(1) ticks on each read, so the age can exceed the slept time by a few ms.
