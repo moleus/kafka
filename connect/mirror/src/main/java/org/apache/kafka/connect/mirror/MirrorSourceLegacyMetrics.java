@@ -18,6 +18,7 @@ package org.apache.kafka.connect.mirror;
 
 import org.apache.kafka.common.MetricNameTemplate;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.metrics.Gauge;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.MetricsReporter;
 import org.apache.kafka.common.metrics.Sensor;
@@ -96,6 +97,12 @@ class MirrorSourceLegacyMetrics implements AutoCloseable {
             REPLICATION_LATENCY_MS_AVG, SOURCE_CONNECTOR_GROUP,
             REPLICATION_LATENCY_MS_AVG_DESCRIPTION, PARTITION_TAGS);
 
+    private static final MetricNameTemplate SOURCE_ACKED_NEXT_OFFSET = new MetricNameTemplate(
+            "source-acked-next-offset", SOURCE_CONNECTOR_GROUP,
+            "The next source offset of the partition that the target did not acknowledge yet. "
+                    + "Every lower offset was acknowledged in this task, committed by an earlier task, "
+                    + "or holds no record. -1 before the consumer position is known.", PARTITION_TAGS);
+
     private final Metrics metrics;
     private final Map<TopicPartition, PartitionMetrics> partitionMetrics;
     private final String source;
@@ -139,6 +146,10 @@ class MirrorSourceLegacyMetrics implements AutoCloseable {
         partitionMetrics.get(topicPartition).byteSensor.record((double) bytes);
     }
 
+    void addAckedOffsetGauge(TopicPartition topicPartition, Gauge<Long> gauge) {
+        metrics.addMetric(metrics.metricInstance(SOURCE_ACKED_NEXT_OFFSET, partitionMetrics.get(topicPartition).tags), gauge);
+    }
+
     void addReporter(MetricsReporter reporter) {
         metrics.addReporter(reporter);
     }
@@ -148,11 +159,11 @@ class MirrorSourceLegacyMetrics implements AutoCloseable {
         private final Sensor byteSensor;
         private final Sensor recordAgeSensor;
         private final Sensor replicationLatencySensor;
+        private final Map<String, String> tags = new LinkedHashMap<>();
 
         PartitionMetrics(TopicPartition topicPartition) {
             String prefix = topicPartition.topic() + "-" + topicPartition.partition() + "-";
 
-            Map<String, String> tags = new LinkedHashMap<>();
             tags.put("source", source);
             tags.put("target", target); 
             tags.put("topic", topicPartition.topic());

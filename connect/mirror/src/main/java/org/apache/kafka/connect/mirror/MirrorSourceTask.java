@@ -19,11 +19,13 @@ package org.apache.kafka.connect.mirror;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.metrics.Gauge;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.header.ConnectHeaders;
@@ -36,6 +38,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,6 +62,8 @@ public class MirrorSourceTask extends SourceTask {
     private boolean stopping = false;
     private Semaphore consumerAccess;
     private OffsetSyncWriter offsetSyncWriter;
+    final AckedOffsets ackedOffsets = new AckedOffsets(); // visible for testing
+    private boolean allPositionsKnown = false;
 
     public MirrorSourceTask() {}
 
@@ -90,6 +95,13 @@ public class MirrorSourceTask extends SourceTask {
         consumer = MirrorUtils.newConsumer(config.sourceConsumerConfig("replication-consumer"));
         Set<TopicPartition> taskTopicPartitions = config.taskTopicPartitions();
         initializeConsumer(taskTopicPartitions);
+        if (legacyMetrics != null) {
+            for (TopicPartition topicPartition : taskTopicPartitions) {
+                legacyMetrics.addAckedOffsetGauge(
+                        new TopicPartition(formatRemoteTopic(topicPartition.topic()), topicPartition.partition()),
+                        (Gauge<Long>) (metricConfig, now) -> ackedOffsets.nextOffset(topicPartition));
+            }
+        }
 
         log.info("{} replicating {} topic-partitions {}->{}: {}.", Thread.currentThread().getName(),
             taskTopicPartitions.size(), sourceClusterAlias, config.targetClusterAlias(), taskTopicPartitions);
@@ -139,6 +151,7 @@ public class MirrorSourceTask extends SourceTask {
         }
         try {
             ConsumerRecords<byte[], byte[]> records = consumer.poll(pollTimeout);
+            trackPolled(records);
             List<SourceRecord> sourceRecords = new ArrayList<>(records.count());
             for (ConsumerRecord<byte[], byte[]> record : records) {
                 SourceRecord converted = convertRecord(record);
@@ -181,6 +194,8 @@ public class MirrorSourceTask extends SourceTask {
         if (stopping) {
             return;
         }
+        // A record dropped by a transformation or lost under errors.tolerance=all has no metadata.
+        // The acked offset stays behind it on purpose: the target did not get this record.
         if (metadata == null) {
             log.debug("No RecordMetadata (source record was probably filtered out during transformation) -- can't sync offsets for {}.", record.topic());
             return;
@@ -189,6 +204,7 @@ public class MirrorSourceTask extends SourceTask {
             log.error("RecordMetadata has no offset -- can't sync offsets for {}.", record.topic());
             return;
         }
+        ackedOffsets.acked(MirrorUtils.unwrapPartition(record.sourcePartition()), MirrorUtils.unwrapOffset(record.sourceOffset()));
         TopicPartition topicPartition = new TopicPartition(record.topic(), record.kafkaPartition());
         long latency = System.currentTimeMillis() - record.timestamp();
         if (legacyMetrics != null) {
@@ -210,6 +226,33 @@ public class MirrorSourceTask extends SourceTask {
         }
     }
  
+    // The position moves past control records too, so it comes from nextOffsets(), not from the
+    // last record. A partition without a committed offset gets its position from the reset.
+    private void trackPolled(ConsumerRecords<byte[], byte[]> records) {
+        Map<TopicPartition, OffsetAndMetadata> nextOffsets = records.nextOffsets();
+        Set<TopicPartition> moved = new HashSet<>(records.partitions());
+        moved.addAll(nextOffsets.keySet());
+        for (TopicPartition topicPartition : moved) {
+            List<Long> offsets = records.records(topicPartition).stream().map(ConsumerRecord::offset).toList();
+            OffsetAndMetadata next = nextOffsets.get(topicPartition);
+            long position = next != null ? next.offset() : offsets.get(offsets.size() - 1) + 1;
+            ackedOffsets.polled(topicPartition, offsets, position);
+        }
+        if (allPositionsKnown) {
+            return;
+        }
+        allPositionsKnown = true;
+        for (TopicPartition topicPartition : consumer.assignment()) {
+            if (!ackedOffsets.positionKnown(topicPartition)) {
+                try {
+                    ackedOffsets.polled(topicPartition, List.of(), consumer.position(topicPartition, Duration.ZERO));
+                } catch (KafkaException e) {
+                    allPositionsKnown = false;
+                }
+            }
+        }
+    }
+
     private Map<TopicPartition, Long> loadOffsets(Set<TopicPartition> topicPartitions) {
         return topicPartitions.stream().collect(Collectors.toMap(x -> x, this::loadOffset));
     }
@@ -236,6 +279,7 @@ public class MirrorSourceTask extends SourceTask {
             long nextOffsetToCommittedOffset = offset + 1L;
             log.trace("Seeking to offset {} for topicPartition: {}", nextOffsetToCommittedOffset, topicPartition);
             consumer.seek(topicPartition, nextOffsetToCommittedOffset);
+            ackedOffsets.seek(topicPartition, nextOffsetToCommittedOffset);
         });
     }
 

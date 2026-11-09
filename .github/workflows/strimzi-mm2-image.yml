@@ -14,14 +14,14 @@ on:
         default: "quay.io/strimzi/kafka:1.1.0-kafka-4.3.0"
       image_tag:
         description: Tag to publish under
-        default: "1.1.0-kafka-4.3.0-metricfix2"
+        default: "1.1.0-kafka-4.3.0-metricfix3"
   push:
-    branches: [ "mm2-metric-loss-fix-4.3" ]
+    branches: [ "mm2-delivery-frontier-4.3" ]
 
 env:
   KAFKA_VERSION: ${{ github.event.inputs.kafka_version || '4.3.0' }}
   STRIMZI_IMAGE: ${{ github.event.inputs.strimzi_image || 'quay.io/strimzi/kafka:1.1.0-kafka-4.3.0' }}
-  IMAGE_TAG: ${{ github.event.inputs.image_tag || '1.1.0-kafka-4.3.0-metricfix2' }}
+  IMAGE_TAG: ${{ github.event.inputs.image_tag || '1.1.0-kafka-4.3.0-metricfix3' }}
 
 jobs:
   jars:
